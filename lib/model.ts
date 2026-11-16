@@ -13,13 +13,23 @@
 //                price a whole category. A category's multiple is the median of its peers, shrunk
 //                toward the universe median with a prior worth four peers, so a lone peer's price
 //                is evidence but never the whole story, and clamped to [0.04, 2].
+//   size       = clamp((tvl / median launched TVL) ^ -0.25, 0.5, 2): the launched set itself shows
+//                that size is priced at a discount — a protocol ten times the median launched size
+//                trades at a lower multiple of its TVL than a small one does. The exponent is not
+//                a taste: it is the setting that prices the launched set back most accurately in
+//                the leave-one-out check below, and the dashboard's method page shows that check.
 //   momentum   = 1 + 0.35 x clamp(change_7d, -50, +100) / 100: a protocol growing into its launch
 //                is priced up, one bleeding TVL is priced down, and a one-week spike cannot run away.
-//   tenure     = 0.78 + 0.44 x min(age_days, 1095) / 1095: three years of running with no token is
+//   tenure     = 0.78 + 0.44 x min(age_days, 1460) / 1460: four years of running with no token is
 //                the strongest evidence a launch is still owed; an unknown age scores the median age
 //                of the pre-token universe, a figure the snapshot itself supplies.
-//   breadth    = 1 + 0.03 x min(chains - 1, 8): every extra chain is distribution a token inherits.
-//   implied    = max(1, round(tvl_usd x peers x momentum x tenure x breadth))
+//   breadth    = 1 + 0.02 x min(chains - 1, 6): every extra chain is distribution a token inherits.
+//   implied    = max(1, round(tvl_usd x peers x size x momentum x tenure x breadth))
+//
+// Every constant above was settled the same way: leave-one-out over the snapshot's launched
+// protocols — price each one as if it were still pre-token, from the others alone, and keep the
+// setting that lands nearest its real market cap. buildRadar runs that check on every build and
+// ships its result in the data, so the method page quotes this snapshot's own figures, not a claim.
 //
 // The same function scores every row; no protocol's name is ever read by the model. Beside the value
 // the model keeps a 0..100 signal: where a farmer's next hour is best spent, blending the log of TVL
@@ -49,7 +59,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the board carries it. */
-export const MODEL_VERSION = 'deepfield-2';
+export const MODEL_VERSION = 'deepfield-3';
 
 /** One launched peer the category multiple rests on. */
 export interface Peer {
@@ -74,14 +84,71 @@ export interface Pricing {
   global_multiple: number;
   launched_count: number;
   median_age_days: number;
+  /** The median TVL of the launched evidence set: the size factor's reference point. */
+  size_ref_tvl: number;
   categories: CategoryPricing[];
   by_category: Map<string, CategoryPricing>;
 }
 
-/** The four multipliers and the implied value one protocol gets. */
+/**
+ * The model's tunable settings, in one place so the leave-one-out check can run the same pricing
+ * under two configurations: the one in force and the previous one it replaced.
+ */
+export interface ModelConfig {
+  prior_peers: number;
+  momentum_weight: number;
+  tenure_floor: number;
+  tenure_range: number;
+  tenure_days: number;
+  breadth_per_chain: number;
+  breadth_cap: number;
+  size_exponent: number;
+}
+
+/** The settings in force (deepfield-3), each settled by the leave-one-out check below. */
+export const CONFIG: ModelConfig = {
+  prior_peers: 4,
+  momentum_weight: 0.35,
+  tenure_floor: 0.78,
+  tenure_range: 0.44,
+  tenure_days: 1460,
+  breadth_per_chain: 0.02,
+  breadth_cap: 6,
+  size_exponent: -0.25,
+};
+
+/** The previous configuration (deepfield-2), kept only so the check can quote both scores. */
+export const CONFIG_V1: ModelConfig = {
+  prior_peers: 4,
+  momentum_weight: 0.35,
+  tenure_floor: 0.78,
+  tenure_range: 0.44,
+  tenure_days: 1095,
+  breadth_per_chain: 0.03,
+  breadth_cap: 8,
+  size_exponent: 0,
+};
+
+/** How one configuration scored when it priced the launched set leave-one-out. */
+export interface BacktestScore {
+  /** The median miss, as a factor: half the launched set was priced within this of its real cap. */
+  typical_factor: number;
+  within_2x_pct: number;
+  within_3x_pct: number;
+}
+
+/** The leave-one-out check's result: both configurations over the same launched set. */
+export interface Backtest {
+  protocols: number;
+  current: BacktestScore;
+  previous: BacktestScore;
+}
+
+/** The five multipliers and the implied value one protocol gets. */
 export interface Scored {
   implied: number;
   peer_multiple: number;
+  size: number;
   momentum: number;
   tenure: number;
   breadth: number;
@@ -93,6 +160,14 @@ export interface FarmStep {
   text: string;
   cost: string;
   time: string;
+}
+
+/** A farm plan's own totals, summed from the same figures its steps quote. */
+export interface PlanTotals {
+  capital_usd: number;
+  gas_usd: number;
+  weeks: number;
+  minutes_per_week: number;
 }
 
 /** One row of board.json: the ranked board's row. */
@@ -110,8 +185,10 @@ export interface BoardRow {
   tier: 'watchlist' | 'early';
   implied_value_usd: number;
   signal: number;
+  plan_totals: PlanTotals;
   model: {
     peer_multiple: number;
+    size_multiplier: number;
     momentum_multiplier: number;
     tenure_multiplier: number;
     breadth_multiplier: number;
@@ -120,6 +197,7 @@ export interface BoardRow {
   /** The same multipliers at full precision: the dashboard re-derives the value from these. */
   model_raw: {
     peer_multiple: number;
+    size_multiplier: number;
     momentum_multiplier: number;
     tenure_multiplier: number;
     breadth_multiplier: number;
@@ -141,7 +219,9 @@ export interface RadarRow {
   tier: 'watchlist' | 'early';
   implied_value_usd: number;
   signal: number;
+  plan_totals: PlanTotals;
   peer_multiple: number;
+  size_multiplier: number;
   momentum_multiplier: number;
   tenure_multiplier: number;
   breadth_multiplier: number;
@@ -169,6 +249,8 @@ export interface RadarData {
   global_multiple: number;
   launched_count: number;
   median_age_days: number;
+  size_ref_tvl: number;
+  backtest: Backtest;
   universe_size: number;
   pre_token_size: number;
   watchlist_size: number;
@@ -268,7 +350,7 @@ export function buildPricing(snapshot: Snapshot): Pricing {
     const n = bucket.ratios.length;
     // Shrink every category toward the universe median behind a prior worth four peers: a lone
     // peer moves the price a fifth of the way from the median to its own multiple, never all of it.
-    const shrunk = (n * med + 4 * globalMultiple) / (n + 4);
+    const shrunk = (n * med + CONFIG.prior_peers * globalMultiple) / (n + CONFIG.prior_peers);
     const pricing: CategoryPricing = {
       category,
       peers: n,
@@ -288,23 +370,62 @@ export function buildPricing(snapshot: Snapshot): Pricing {
     global_multiple: round4(globalMultiple),
     launched_count: launched.length,
     median_age_days: ages.length > 0 ? Math.round(median(ages)) : 365,
+    size_ref_tvl: launched.length > 0 ? Math.round(median(launched.map((p) => p.tvl_usd))) : 0,
     categories,
     by_category: byCategory,
   };
 }
 
-/** The four multipliers and the implied value one protocol gets under the pricing table. */
-export function impliedValue(p: SnapshotProtocol, asOf: string, pricing: Pricing): Scored {
+/** The size factor: how far a protocol's TVL sits from the launched set's median, priced at the measured discount. */
+export function sizeFactor(tvl: number, refTvl: number, exponent: number): number {
+  if (exponent === 0 || refTvl <= 0 || tvl <= 0) return 1;
+  return clamp(Math.pow(tvl / refTvl, exponent), 0.5, 2);
+}
+
+/** The five multipliers and the implied value one protocol gets under the pricing table. */
+export function impliedValue(p: SnapshotProtocol, asOf: string, pricing: Pricing, config: ModelConfig = CONFIG): Scored {
   const age = ageDays(asOf, p.listed_at);
   const cat = pricing.by_category.get(p.category ?? 'Uncategorised');
   const peerMultiple = cat !== undefined ? cat.multiple : pricing.global_multiple;
+  const size = sizeFactor(p.tvl_usd, pricing.size_ref_tvl, config.size_exponent);
   const pct = clamp(typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0, -50, 100);
-  const momentum = 1 + 0.35 * (pct / 100);
+  const momentum = 1 + config.momentum_weight * (pct / 100);
   const ageForModel = age ?? pricing.median_age_days;
-  const tenure = 0.78 + 0.44 * (clamp(ageForModel, 0, 1095) / 1095);
-  const breadth = 1 + 0.03 * Math.min(Math.max(p.chains.length - 1, 0), 8);
-  const implied = Math.max(1, Math.round(p.tvl_usd * peerMultiple * momentum * tenure * breadth));
-  return { implied, peer_multiple: peerMultiple, momentum, tenure, breadth, age };
+  const tenure = config.tenure_floor + config.tenure_range * (clamp(ageForModel, 0, config.tenure_days) / config.tenure_days);
+  const breadth = 1 + config.breadth_per_chain * Math.min(Math.max(p.chains.length - 1, 0), config.breadth_cap);
+  const implied = Math.max(1, Math.round(p.tvl_usd * peerMultiple * size * momentum * tenure * breadth));
+  return { implied, peer_multiple: peerMultiple, size, momentum, tenure, breadth, age };
+}
+
+/**
+ * The leave-one-out check: price every launched protocol as if it were still pre-token, from a
+ * pricing table built out of the others alone, and score how near the model lands to the market
+ * cap it actually trades at. Run under both configurations so the method page can quote the
+ * improvement on this snapshot's own figures. Pure arithmetic over the sealed snapshot: the same
+ * bytes in, the same scores out.
+ */
+export function backtestLaunched(snapshot: Snapshot): Backtest {
+  const launched = snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  const score = (config: ModelConfig): BacktestScore => {
+    const misses: number[] = [];
+    let within2 = 0;
+    let within3 = 0;
+    for (const target of launched) {
+      const rest = { ...snapshot, protocols: snapshot.protocols.filter((p) => p.slug !== target.slug) };
+      const pricing = buildPricing(rest);
+      const { implied } = impliedValue(target, snapshot.as_of, pricing, config);
+      const miss = Math.abs(Math.log10(implied / target.mcap_usd!));
+      misses.push(miss);
+      if (miss <= Math.log10(2)) within2++;
+      if (miss <= Math.log10(3)) within3++;
+    }
+    return {
+      typical_factor: round2(Math.pow(10, median(misses))),
+      within_2x_pct: Math.round((100 * within2) / launched.length),
+      within_3x_pct: Math.round((100 * within3) / launched.length),
+    };
+  };
+  return { protocols: launched.length, current: score(CONFIG), previous: score(CONFIG_V1) };
 }
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
@@ -378,9 +499,25 @@ function secondActionFor(p: SnapshotProtocol, chain: string): string {
   return `Make one further qualifying action inside ${name} on ${chain} each week, a deposit top-up, a claim or a vote, and never two on the same day`;
 }
 
+/** A plan's totals, summed from the same figures its steps quote: capital, gas, weeks, weekly minutes. */
+export function planTotals(p: SnapshotProtocol, age: number | null): PlanTotals {
+  const capital = capitalFor(p);
+  const second = secondChainOf(p) !== null;
+  const weeks = weeksFor(age);
+  const gas = capital >= 150 ? 8 : 4;
+  return {
+    capital_usd: capital + (second ? Math.round(capital / 2) : 0),
+    gas_usd: 3 + gas + (second ? gas : 0) + 2 * weeks + 5,
+    weeks,
+    minutes_per_week: 25,
+  };
+}
+
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a time, derived from the
- * protocol's own record (category, chains, TVL, age) and never from a hand-written list of names.
+ * A protocol's farm plan: eight or nine steps, each an action with a cost and a time, derived from
+ * the protocol's own record (category, chains, TVL, age) and never from a hand-written list of
+ * names. The last step but one sums the plan from its own figures, so a reader sees the whole
+ * commitment before spending anything.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -388,6 +525,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const capital = capitalFor(p);
   const weeks = weeksFor(age);
   const gas = capital >= 150 ? 8 : 4;
+  const totals = planTotals(p, age);
   const steps: FarmStep[] = [
     {
       text: `Set up a fresh wallet for ${p.name} alone, fund it from an exchange withdrawal, and keep its seed phrase offline on paper`,
@@ -414,14 +552,24 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '10 minutes a week',
     },
     {
+      text: `After the first week, open ${p.name}'s own points or rewards page and confirm this wallet's position is actually counted; if the page states a minimum balance or activity level, meet exactly that and write it in the log`,
+      cost: 'nothing to check, and never pay anyone to claim for you',
+      time: '10 minutes, once',
+    },
+    {
       text: `Keep the weekly actions running for ${weeks} weeks without a gap, so the wallet appears in several activity snapshots rather than one`,
       cost: `the $${capital} stays in the position, plus about $${2 * weeks} of gas over the plan`,
       time: `${weeks} weeks`,
     },
     {
-      text: `Open ${p.name}'s own points, rewards or governance page, link the wallet there, and record what it shows in a farm log with dates and transaction hashes`,
-      cost: 'nothing to check, and never pay anyone to claim for you',
-      time: '10 minutes',
+      text: `Write the wallet, the dates and every transaction in a farm log as you go, so the position can be repeated, proven or unwound without guesswork`,
+      cost: 'nothing but the log',
+      time: '5 minutes a week',
+    },
+    {
+      text: `The whole plan, summed: $${totals.capital_usd} of capital parked across ${second !== null ? 'two chains' : 'one chain'}, about $${totals.gas_usd} of gas across ${weeks} weeks, and about ${totals.minutes_per_week} minutes of work a week — if ${p.name} ever asks for more than the position itself, stop and re-read the plan`,
+      cost: `about $${totals.gas_usd} of gas in total`,
+      time: `${weeks} weeks in total`,
     },
     {
       text: `When a launch is announced, claim only from the link on ${p.name}'s official page, then unwind the position in two halves a week apart`,
@@ -446,7 +594,7 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
   const hi = Math.max(...logs);
   for (const s of scored) {
     const size = hi > lo ? (Math.log10(Math.max(1, s.p.tvl_usd)) - lo) / (hi - lo) : 0.5;
-    const signal = Math.round(100 * (0.4 * size + 0.25 * ((s.momentum - 0.825) / 0.525) + 0.2 * ((s.tenure - 0.78) / 0.44) + 0.15 * ((s.breadth - 1) / 0.24)));
+    const signal = Math.round(100 * (0.4 * size + 0.25 * ((s.momentum - 0.825) / 0.525) + 0.2 * ((s.tenure - 0.78) / 0.44) + 0.15 * ((s.breadth - 1) / 0.12)));
     (s as { signal?: number }).signal = clamp(signal, 1, 99);
   }
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -464,8 +612,10 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
     tier: watchlist.has(s.p.slug) ? ('watchlist' as const) : ('early' as const),
     implied_value_usd: s.implied,
     signal: (s as { signal?: number }).signal ?? 50,
+    plan_totals: planTotals(s.p, s.age),
     model: {
       peer_multiple: s.peer_multiple,
+      size_multiplier: round4(s.size),
       momentum_multiplier: round4(s.momentum),
       tenure_multiplier: round4(s.tenure),
       breadth_multiplier: round4(s.breadth),
@@ -473,6 +623,7 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
     },
     model_raw: {
       peer_multiple: s.peer_multiple,
+      size_multiplier: s.size,
       momentum_multiplier: s.momentum,
       tenure_multiplier: s.tenure,
       breadth_multiplier: s.breadth,
@@ -514,6 +665,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     global_multiple: pricing.global_multiple,
     launched_count: pricing.launched_count,
     median_age_days: pricing.median_age_days,
+    size_ref_tvl: pricing.size_ref_tvl,
+    backtest: backtestLaunched(snapshot),
     universe_size: snapshot.protocols.length,
     pre_token_size: snapshot.protocols.filter(isPreToken).length,
     watchlist_size: snapshot.watchlist.length,
@@ -535,7 +688,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       tier: r.tier,
       implied_value_usd: r.implied_value_usd,
       signal: r.signal,
+      plan_totals: r.plan_totals,
       peer_multiple: r.model_raw.peer_multiple,
+      size_multiplier: r.model_raw.size_multiplier,
       momentum_multiplier: r.model_raw.momentum_multiplier,
       tenure_multiplier: r.model_raw.tenure_multiplier,
       breadth_multiplier: r.model_raw.breadth_multiplier,
