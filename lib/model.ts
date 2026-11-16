@@ -1,18 +1,38 @@
 // The Deepfield Radar model: one sealed snapshot of the protocol universe in, one ranked board out.
 //
-// The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and adds every
-// further pre-token protocol the house's own product exclusions still leave standing: no CEX, no
-// bridge or staking wrapper of a token that already trades, no versioned pool of another protocol,
-// no name that opens with an exchange's. The watchlist's rule, applied to the whole universe, so the
-// radar's early rows are found by the same test the floor was drawn with.
+// The board covers EVERY pre-token protocol in the snapshot — the watchlist's forty and every other
+// protocol that records no token, none set aside. Earlier builds ranked only the rows that passed a
+// product test and left the exchange, bridge, staking-wrapper and versioned rows off the board; a
+// radar that cannot see a third of its universe is not finished, so those rows are priced and ranked
+// here too, each under an explicit class the snapshot's own fields assign:
+//
+//   class      = read off the protocol's category and the structure of its name, never a kept list
+//                of names: 'exchange' (category CEX), 'bridge' (category Bridge or Canonical
+//                Bridge), 'staking-wrapper' (category Liquid Staking, Liquid Restaking or Restaked
+//                BTC), 'versioned' (the name ends in a release marker), 'wrapper' (the name carries
+//                a wrapped/staked/staking word, in any other category), else 'core'.
+//   treatment  = the three category classes are priced off their own class's launched peers, pooled
+//                across the class's categories with the same winsorise/shrink/clamp as any category:
+//                an exchange is priced by what launched exchanges trade at, a staking wrapper by
+//                what launched staking wrappers trade at — the class's own evidence, not the core
+//                universe's. A 'versioned' row is priced at its family's share: its class multiplier
+//                is 1 / (the number of snapshot rows sharing its version-stripped name), so two
+//                releases of one protocol split one price instead of claiming two. A 'wrapper' row
+//                in a generic category takes the staking classes' measured haircut: the staking
+//                class's multiple in force divided by the universe median, clamped to [0.2, 1].
+//                Every other row's class multiplier is 1. No extra haircut is stacked on the
+//                category classes: the leave-one-out check below shows their own peer multiple
+//                already carries the class's discount, and stacking a second one prices the
+//                launched set worse, so the model does not do it.
 //
 // Implied value is priced off the market's own evidence, never off a hand-kept list of names:
 //
-//   peers      = the snapshot's launched protocols in the same category: the multiple of market cap
-//                to TVL each one actually trades at, winsorised to [0.02, 5] so one mania cannot
-//                price a whole category. A category's multiple is the median of its peers, shrunk
-//                toward the universe median with a prior worth four peers, so a lone peer's price
-//                is evidence but never the whole story, and clamped to [0.04, 2].
+//   peers      = the snapshot's launched protocols in the same category (or, for the three category
+//                classes, in the same class): the multiple of market cap to TVL each one actually
+//                trades at, winsorised to [0.02, 5] so one mania cannot price a whole category. A
+//                multiple is the median of its peers, shrunk toward the universe median with a prior
+//                worth four peers, so a lone peer's price is evidence but never the whole story,
+//                and clamped to [0.04, 2].
 //   size       = clamp((tvl / median launched TVL) ^ -0.25, 0.5, 2): the launched set itself shows
 //                that size is priced at a discount — a protocol ten times the median launched size
 //                trades at a lower multiple of its TVL than a small one does. The exponent is not
@@ -24,16 +44,19 @@
 //                the strongest evidence a launch is still owed; an unknown age scores the median age
 //                of the pre-token universe, a figure the snapshot itself supplies.
 //   breadth    = 1 + 0.02 x min(chains - 1, 6): every extra chain is distribution a token inherits.
-//   implied    = max(1, round(tvl_usd x peers x size x momentum x tenure x breadth))
+//   class      = the class multiplier above: a versioned family's share, a wrapper's measured
+//                haircut, else 1.
+//   implied    = max(1, round(tvl_usd x peers x size x momentum x tenure x breadth x class))
 //
 // Every constant above was settled the same way: leave-one-out over the snapshot's launched
 // protocols — price each one as if it were still pre-token, from the others alone, and keep the
 // setting that lands nearest its real market cap. buildRadar runs that check on every build and
 // ships its result in the data, so the method page quotes this snapshot's own figures, not a claim.
 //
-// The same function scores every row; no protocol's name is ever read by the model. Beside the value
-// the model keeps a 0..100 signal: where a farmer's next hour is best spent, blending the log of TVL
-// against the board's own range with momentum, tenure and breadth.
+// The same function scores every row; a protocol's name is read only for its structure (a release
+// marker, a wrapper word, its family), never against a list. Beside the value the model keeps a
+// 0..100 signal: where a farmer's next hour is best spent, blending the log of TVL against the
+// board's own range with momentum, tenure and breadth.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -59,7 +82,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the board carries it. */
-export const MODEL_VERSION = 'deepfield-3';
+export const MODEL_VERSION = 'deepfield-4';
 
 /** One launched peer the category multiple rests on. */
 export interface Peer {
@@ -79,6 +102,17 @@ export interface CategoryPricing {
   top: Peer[];
 }
 
+/** The structural class a protocol's own snapshot fields assign it: see the header. */
+export type ProtocolClass = 'core' | 'exchange' | 'bridge' | 'staking-wrapper' | 'versioned' | 'wrapper';
+
+/** A class's pricing evidence: its launched peers pooled across its categories, priced like a category. */
+export interface ClassPricing {
+  protocol_class: ProtocolClass;
+  peers: number;
+  median: number | null;
+  multiple: number;
+}
+
 /** The model's whole pricing table, computed from the snapshot alone. */
 export interface Pricing {
   global_multiple: number;
@@ -88,6 +122,12 @@ export interface Pricing {
   size_ref_tvl: number;
   categories: CategoryPricing[];
   by_category: Map<string, CategoryPricing>;
+  classes: ClassPricing[];
+  by_class: Map<string, ClassPricing>;
+  /** The staking classes' measured haircut, in force for 'wrapper' rows: staking multiple / universe median, clamped. */
+  wrapper_discount: number;
+  /** Snapshot rows per version-stripped family name: a versioned row's share is 1 / this count. */
+  family_size: Map<string, number>;
 }
 
 /**
@@ -105,7 +145,7 @@ export interface ModelConfig {
   size_exponent: number;
 }
 
-/** The settings in force (deepfield-3), each settled by the leave-one-out check below. */
+/** The settings in force (the deepfield-3 peer-pricing core, kept whole in deepfield-4), each settled by the leave-one-out check below. */
 export const CONFIG: ModelConfig = {
   prior_peers: 4,
   momentum_weight: 0.35,
@@ -144,7 +184,7 @@ export interface Backtest {
   previous: BacktestScore;
 }
 
-/** The five multipliers and the implied value one protocol gets. */
+/** The multipliers and the implied value one protocol gets. */
 export interface Scored {
   implied: number;
   peer_multiple: number;
@@ -152,6 +192,8 @@ export interface Scored {
   momentum: number;
   tenure: number;
   breadth: number;
+  class_multiplier: number;
+  protocol_class: ProtocolClass;
   age: number | null;
 }
 
@@ -183,6 +225,7 @@ export interface BoardRow {
   age_days: number | null;
   token_status: 'pre-token';
   tier: 'watchlist' | 'early';
+  protocol_class: ProtocolClass;
   implied_value_usd: number;
   signal: number;
   plan_totals: PlanTotals;
@@ -192,6 +235,7 @@ export interface BoardRow {
     momentum_multiplier: number;
     tenure_multiplier: number;
     breadth_multiplier: number;
+    class_multiplier: number;
     category_peers: number;
   };
   /** The same multipliers at full precision: the dashboard re-derives the value from these. */
@@ -201,6 +245,7 @@ export interface BoardRow {
     momentum_multiplier: number;
     tenure_multiplier: number;
     breadth_multiplier: number;
+    class_multiplier: number;
   };
   farm_steps: string[];
 }
@@ -217,6 +262,7 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   tier: 'watchlist' | 'early';
+  protocol_class: ProtocolClass;
   implied_value_usd: number;
   signal: number;
   plan_totals: PlanTotals;
@@ -225,6 +271,7 @@ export interface RadarRow {
   momentum_multiplier: number;
   tenure_multiplier: number;
   breadth_multiplier: number;
+  class_multiplier: number;
   farm_steps: string[];
 }
 
@@ -258,6 +305,8 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   categories: { category: string; peers: number; median: number | null; multiple: number }[];
+  classes: { protocol_class: string; peers: number; median: number | null; multiple: number }[];
+  wrapper_discount: number;
   peers: Record<string, Peer[]>;
   rows: RadarRow[];
   live: LiveRow[];
@@ -300,29 +349,36 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
-/** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
+/** DefiLlama's version-marker rule: a name ending in a release marker is a version of a protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
 /** A whole word that marks a wrapped or staked product of a token that already trades. */
 const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
 
-/** The categories the house's watchlist rule keeps off the floor: products of tokens that trade. */
-const PRODUCT_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
-
-/** The exchanges whose own products the watchlist rule keeps off the floor. */
-const EXCHANGE_PREFIXES = ['Binance', 'Coinbase', 'Bybit', 'Kraken', 'Bitget', 'OKX', 'Bitfinex', 'Gemini'];
+/** The categories that assign the three category classes: snapshot fields, not names. */
+const CLASS_CATEGORIES: { protocol_class: ProtocolClass; categories: Set<string> }[] = [
+  { protocol_class: 'exchange', categories: new Set(['CEX']) },
+  { protocol_class: 'bridge', categories: new Set(['Bridge', 'Canonical Bridge']) },
+  { protocol_class: 'staking-wrapper', categories: new Set(['Liquid Staking', 'Liquid Restaking', 'Restaked BTC']) },
+];
 
 /**
- * Whether a pre-token protocol is one the radar may rank: the watchlist's own product test, so a
- * wrapped, staked or bridged product of a launched token is never mistaken for a launch still owed.
+ * The class a protocol's own snapshot fields assign it: its category first, then the structure of
+ * its name (a release marker, a wrapper word), else 'core'. Every pre-token protocol gets a class
+ * and a rank; the class decides which evidence prices it, never whether it is priced.
  */
-export function isRankable(p: SnapshotProtocol): boolean {
-  if (!isPreToken(p)) return false;
-  if (p.category !== null && PRODUCT_CATEGORIES.has(p.category)) return false;
-  if (VERSIONED.test(p.name)) return false;
-  if (WRAPPED_WORD.test(p.name)) return false;
-  if (EXCHANGE_PREFIXES.some((x) => p.name.startsWith(x))) return false;
-  return true;
+export function classOf(p: SnapshotProtocol): ProtocolClass {
+  if (p.category !== null) {
+    for (const entry of CLASS_CATEGORIES) if (entry.categories.has(p.category)) return entry.protocol_class;
+  }
+  if (VERSIONED.test(p.name)) return 'versioned';
+  if (WRAPPED_WORD.test(p.name)) return 'wrapper';
+  return 'core';
+}
+
+/** A name with its release marker stripped: the family a versioned protocol belongs to. */
+export function familyBase(name: string): string {
+  return name.replace(VERSIONED, '');
 }
 
 /**
@@ -362,6 +418,36 @@ export function buildPricing(snapshot: Snapshot): Pricing {
     byCategory.set(category, pricing);
   }
   categories.sort((a, b) => b.peers - a.peers || (a.category < b.category ? -1 : 1));
+  // The class table: the three category classes pooled across their categories, priced with the
+  // same winsorise, shrink and clamp as any category, so a class's rows rest on the class's own
+  // launched evidence. A class with no launched peer falls back to the universe median.
+  const classes: ClassPricing[] = [];
+  const byClass = new Map<string, ClassPricing>();
+  for (const entry of CLASS_CATEGORIES) {
+    const pooled: number[] = [];
+    for (const p of launched) if (p.category !== null && entry.categories.has(p.category)) pooled.push(clamp(p.mcap_usd! / p.tvl_usd, 0.02, 5));
+    const med = pooled.length > 0 ? median(pooled) : null;
+    const n = pooled.length;
+    const shrunk = med === null ? globalMultiple : (n * med + CONFIG.prior_peers * globalMultiple) / (n + CONFIG.prior_peers);
+    const pricing: ClassPricing = {
+      protocol_class: entry.protocol_class,
+      peers: n,
+      median: med === null ? null : round4(med),
+      multiple: round4(clamp(shrunk, 0.04, 2)),
+    };
+    classes.push(pricing);
+    byClass.set(entry.protocol_class, pricing);
+  }
+  // The wrapper haircut: what the staking classes' evidence says a wrapper's dollar of TVL is
+  // worth against the universe's, measured on the launched set and clamped to [0.2, 1].
+  const staking = byClass.get('staking-wrapper');
+  const wrapperDiscount = staking !== undefined && globalMultiple > 0 ? round4(clamp(staking.multiple / globalMultiple, 0.2, 1)) : 1;
+  // Family sizes over the whole snapshot: a versioned row's share is 1 / its family's size.
+  const familySize = new Map<string, number>();
+  for (const p of snapshot.protocols) {
+    const base = familyBase(p.name);
+    familySize.set(base, (familySize.get(base) ?? 0) + 1);
+  }
   const ages = snapshot.protocols
     .filter(isPreToken)
     .map((p) => ageDays(snapshot.as_of, p.listed_at))
@@ -373,6 +459,10 @@ export function buildPricing(snapshot: Snapshot): Pricing {
     size_ref_tvl: launched.length > 0 ? Math.round(median(launched.map((p) => p.tvl_usd))) : 0,
     categories,
     by_category: byCategory,
+    classes,
+    by_class: byClass,
+    wrapper_discount: wrapperDiscount,
+    family_size: familySize,
   };
 }
 
@@ -382,19 +472,30 @@ export function sizeFactor(tvl: number, refTvl: number, exponent: number): numbe
   return clamp(Math.pow(tvl / refTvl, exponent), 0.5, 2);
 }
 
-/** The five multipliers and the implied value one protocol gets under the pricing table. */
+/** The multipliers and the implied value one protocol gets under the pricing table. */
 export function impliedValue(p: SnapshotProtocol, asOf: string, pricing: Pricing, config: ModelConfig = CONFIG): Scored {
   const age = ageDays(asOf, p.listed_at);
+  const protocolClass = classOf(p);
+  // The three category classes are priced off their class's pooled launched peers; every other
+  // row off its category's. A class or category with no pricing entry falls back to the universe.
+  const cls = pricing.by_class.get(protocolClass);
   const cat = pricing.by_category.get(p.category ?? 'Uncategorised');
-  const peerMultiple = cat !== undefined ? cat.multiple : pricing.global_multiple;
+  const peerMultiple = cls !== undefined ? cls.multiple : cat !== undefined ? cat.multiple : pricing.global_multiple;
   const size = sizeFactor(p.tvl_usd, pricing.size_ref_tvl, config.size_exponent);
   const pct = clamp(typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0, -50, 100);
   const momentum = 1 + config.momentum_weight * (pct / 100);
   const ageForModel = age ?? pricing.median_age_days;
   const tenure = config.tenure_floor + config.tenure_range * (clamp(ageForModel, 0, config.tenure_days) / config.tenure_days);
   const breadth = 1 + config.breadth_per_chain * Math.min(Math.max(p.chains.length - 1, 0), config.breadth_cap);
-  const implied = Math.max(1, Math.round(p.tvl_usd * peerMultiple * size * momentum * tenure * breadth));
-  return { implied, peer_multiple: peerMultiple, size, momentum, tenure, breadth, age };
+  // The class multiplier: a versioned row takes its family's share (1 / family size, so sibling
+  // releases split one price), a wrapper row takes the staking classes' measured haircut, and
+  // every other row takes 1 — the category classes' own peer multiple already carries their
+  // discount, as the leave-one-out check confirms.
+  let classMultiplier = 1;
+  if (protocolClass === 'versioned') classMultiplier = 1 / Math.max(1, pricing.family_size.get(familyBase(p.name)) ?? 1);
+  else if (protocolClass === 'wrapper') classMultiplier = pricing.wrapper_discount;
+  const implied = Math.max(1, Math.round(p.tvl_usd * peerMultiple * size * momentum * tenure * breadth * classMultiplier));
+  return { implied, peer_multiple: peerMultiple, size, momentum, tenure, breadth, class_multiplier: classMultiplier, protocol_class: protocolClass, age };
 }
 
 /**
@@ -468,6 +569,8 @@ function weeksFor(age: number | null): number {
 function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
+  if (c === 'cex') return `Fund a ${name} account with $${capital} and place two small spot trades, so the account carries real trading history and a balance`;
+  if (c.includes('bridge')) return `Bridge $${capital} of USDC through ${name} to ${chain} and keep the bridged funds working on the far side`
   if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return `Supply $${capital} of USDC to ${name} on ${chain} so the wallet carries a live lending position`;
   if (c.includes('dex') || c.includes('swap')) return `Seed $${capital} into ${name}'s deepest USDC pool on ${chain} and leave the LP position open`;
   if (c.includes('leveraged farm')) return `Open a $${capital} leveraged farm on ${name} on ${chain} at its lowest leverage setting`;
@@ -499,6 +602,49 @@ function secondActionFor(p: SnapshotProtocol, chain: string): string {
   return `Make one further qualifying action inside ${name} on ${chain} each week, a deposit top-up, a claim or a vote, and never two on the same day`;
 }
 
+/**
+ * The class step: what a farmer does differently for a row of this class, from the class the
+ * snapshot's fields assigned. Core rows need none; every other class gets exactly one, so plans
+ * for the newly covered rows speak to what those protocols actually count.
+ */
+function classStep(p: SnapshotProtocol): FarmStep | null {
+  const name = p.name;
+  switch (classOf(p)) {
+    case 'exchange':
+      return {
+        text: `Keep a modest balance on ${name} between trades and never empty the account, since an exchange token, if one ever comes, is counted from trading accounts and balances rather than from deposits alone`,
+        cost: 'the trading fees on small trades, about $2 a week',
+        time: '5 minutes a week',
+      };
+    case 'bridge':
+      return {
+        text: `Bridge a small amount back through ${name} once a month, in the opposite direction, so the wallet appears as a user of the bridge itself and not only of the chains it connects`,
+        cost: 'bridge fees of about $3 each way',
+        time: '10 minutes a month',
+      };
+    case 'staking-wrapper':
+      return {
+        text: `Hold the receipt token ${name} issues in the wallet for the whole plan; near the end, unstake once and restake a week later, so the wallet shows a full staking round trip rather than a single deposit`,
+        cost: 'staking and unstaking gas, about $4 in total',
+        time: '15 minutes, twice',
+      };
+    case 'versioned':
+      return {
+        text: `Do every action in this plan on ${name} itself, the current release, and keep older releases of the same protocol out of the wallet, so the activity counts against the version that would launch`,
+        cost: 'nothing extra',
+        time: 'no extra time',
+      };
+    case 'wrapper':
+      return {
+        text: `Keep ${name}'s receipt or staking position in the wallet untouched between the weekly actions, since a wrapper's own count is taken from holdings held over time, not from transactions alone`,
+        cost: 'nothing extra',
+        time: 'no extra time',
+      };
+    default:
+      return null;
+  }
+}
+
 /** A plan's totals, summed from the same figures its steps quote: capital, gas, weeks, weekly minutes. */
 export function planTotals(p: SnapshotProtocol, age: number | null): PlanTotals {
   const capital = capitalFor(p);
@@ -514,7 +660,7 @@ export function planTotals(p: SnapshotProtocol, age: number | null): PlanTotals 
 }
 
 /**
- * A protocol's farm plan: eight or nine steps, each an action with a cost and a time, derived from
+ * A protocol's farm plan: eight to ten steps, each an action with a cost and a time, derived from
  * the protocol's own record (category, chains, TVL, age) and never from a hand-written list of
  * names. The last step but one sums the plan from its own figures, so a reader sees the whole
  * commitment before spending anything.
@@ -545,6 +691,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes',
     });
   }
+  const extra = classStep(p);
+  if (extra !== null) steps.push(extra);
   steps.push(
     {
       text: secondActionFor(p, chain),
@@ -580,10 +728,10 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   return steps;
 }
 
-/** The protocols the board ranks, strongest first, with ranks 1..n and a 0..100 signal apiece. */
+/** Every pre-token protocol in the snapshot, ranked strongest first, with ranks 1..n and a 0..100 signal apiece. */
 export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
   const watchlist = new Set(snapshot.watchlist);
-  const chosen = snapshot.protocols.filter((p) => watchlist.has(p.slug) || isRankable(p));
+  const chosen = snapshot.protocols.filter(isPreToken);
   const scored = chosen.map((p) => {
     const s = impliedValue(p, snapshot.as_of, pricing);
     return { p, ...s };
@@ -610,6 +758,7 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
     age_days: s.age,
     token_status: 'pre-token' as const,
     tier: watchlist.has(s.p.slug) ? ('watchlist' as const) : ('early' as const),
+    protocol_class: s.protocol_class,
     implied_value_usd: s.implied,
     signal: (s as { signal?: number }).signal ?? 50,
     plan_totals: planTotals(s.p, s.age),
@@ -619,7 +768,8 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
       momentum_multiplier: round4(s.momentum),
       tenure_multiplier: round4(s.tenure),
       breadth_multiplier: round4(s.breadth),
-      category_peers: pricing.by_category.get(s.p.category ?? 'Uncategorised')?.peers ?? 0,
+      class_multiplier: round4(s.class_multiplier),
+      category_peers: pricing.by_class.get(s.protocol_class)?.peers ?? pricing.by_category.get(s.p.category ?? 'Uncategorised')?.peers ?? 0,
     },
     model_raw: {
       peer_multiple: s.peer_multiple,
@@ -627,6 +777,7 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
       momentum_multiplier: s.momentum,
       tenure_multiplier: s.tenure,
       breadth_multiplier: s.breadth,
+      class_multiplier: s.class_multiplier,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
   }));
@@ -635,7 +786,7 @@ export function buildBoard(snapshot: Snapshot, pricing: Pricing): BoardRow[] {
 /** The launched protocols, by market cap, for the dashboard's Launched view and its peer evidence. */
 export function liveRows(snapshot: Snapshot): LiveRow[] {
   return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .filter((p) => !isPreToken(p))
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
     .slice(0, 24)
     .map((p) => ({
@@ -674,6 +825,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     early_size: board.filter((r) => r.tier === 'early').length,
     live_size: live.length,
     categories: pricing.categories.map((c) => ({ category: c.category, peers: c.peers, median: c.median, multiple: c.multiple })),
+    classes: pricing.classes.map((c) => ({ protocol_class: c.protocol_class, peers: c.peers, median: c.median, multiple: c.multiple })),
+    wrapper_discount: pricing.wrapper_discount,
     peers,
     rows: board.map((r) => ({
       rank: r.rank,
@@ -686,6 +839,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       listed_at: r.listed_at,
       age_days: r.age_days,
       tier: r.tier,
+      protocol_class: r.protocol_class,
       implied_value_usd: r.implied_value_usd,
       signal: r.signal,
       plan_totals: r.plan_totals,
@@ -694,6 +848,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       momentum_multiplier: r.model_raw.momentum_multiplier,
       tenure_multiplier: r.model_raw.tenure_multiplier,
       breadth_multiplier: r.model_raw.breadth_multiplier,
+      class_multiplier: r.model_raw.class_multiplier,
       farm_steps: r.farm_steps,
     })),
     live,
@@ -749,6 +904,8 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   const slugs = new Set(board.map((r) => r.slug));
   const missing = snapshot.watchlist.filter((s) => !slugs.has(s));
   if (missing.length > 0) return `the board misses ${missing.length} watchlist slugs: ${missing.slice(0, 5).join(', ')}`;
+  const unranked = snapshot.protocols.filter((p) => isPreToken(p) && !slugs.has(p.slug));
+  if (unranked.length > 0) return `the board leaves ${unranked.length} pre-token protocols unranked: ${unranked.slice(0, 5).map((p) => p.slug).join(', ')}`;
   if (board.length < 100 || board.length > 4000) return `the board holds ${board.length} rows, outside 100..4000`;
   const ranks = board.map((r) => r.rank).sort((a, b) => a - b);
   for (let i = 0; i < ranks.length; i++) if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
