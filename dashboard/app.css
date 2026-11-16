@@ -56,6 +56,23 @@ a { color: var(--cyan); }
 .formula b { color: var(--phos); font-weight: 600; }
 .formula .op { color: var(--faint); padding: 0 2px; }
 
+/* Top picks */
+.picks { margin: 16px 0 0; }
+.picks-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+.picks-head h2 { margin: 0; font-size: 13px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.picks-head span { color: var(--faint); font-size: 12px; }
+.pick-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+@media (max-width: 900px) { .pick-grid { grid-template-columns: repeat(2, 1fr); } }
+.pick { text-align: left; background: var(--panel); border: 1px solid var(--line2); border-top: 2px solid var(--phos-dim); padding: 11px 13px; cursor: pointer; color: var(--ink); font: inherit; }
+.pick:hover { background: var(--panel2); border-top-color: var(--phos); }
+.pick-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.pick-name { font-weight: 700; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-sig { font-family: var(--num); color: var(--phos); font-size: 15px; font-weight: 700; }
+.pick-iv { font-family: var(--num); font-size: 19px; color: var(--phos); margin-top: 3px; }
+.pick-why { color: var(--muted); font-size: 12px; margin-top: 2px; min-height: 2.6em; }
+.pick-cost { color: var(--faint); font-family: var(--num); font-size: 11px; margin-top: 5px; border-top: 1px dashed var(--line); padding-top: 5px; }
+.plan-totals { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+
 /* Tabs + controls */
 .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0 10px; }
 .tabs { display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--line2); padding: 3px; border-radius: 8px; }

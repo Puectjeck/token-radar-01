@@ -1,8 +1,9 @@
 // Deepfield Radar's dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
-// renders the ranked board, a launched-peers view, the method behind the pricing, and a detail
-// page per protocol with the model's own arithmetic and the protocol's farm plan. No network:
-// every byte it shows is in data.js, and the page re-derives each implied value from the row's
-// own multipliers and checks it against the board's figure before it calls the row verified.
+// renders the ranked board led by its five top picks, a launched-peers view, the method behind
+// the pricing with the model's own leave-one-out check, and a detail page per protocol with the
+// model's own arithmetic, the plan's totals and the protocol's farm plan. No network: every byte
+// it shows is in data.js, and the page re-derives each implied value from the row's own
+// multipliers and checks it against the board's figure before it calls the row verified.
 (function () {
   'use strict';
 
@@ -31,7 +32,7 @@
 
   // The model in one function: the same arithmetic lib/model.ts runs, from the row's own figures.
   function impliedOf(row) {
-    return Math.max(1, Math.round(row.tvl_usd * row.peer_multiple * row.momentum_multiplier * row.tenure_multiplier * row.breadth_multiplier));
+    return Math.max(1, Math.round(row.tvl_usd * row.peer_multiple * row.size_multiplier * row.momentum_multiplier * row.tenure_multiplier * row.breadth_multiplier));
   }
 
   function el(tag, attrs) {
@@ -119,6 +120,7 @@
     f.appendChild(document.createTextNode('IMPLIED VALUE = TVL '));
     var parts = [
       ['x peer multiple', 'the median market-cap / TVL of the category\u2019s launched protocols'],
+      ['x size', 'TVL against the launched set\u2019s median, at the size discount the launched set itself shows'],
       ['x momentum', 'the 7-day TVL change, winsorised'],
       ['x tenure', 'years tracked with no token'],
       ['x breadth', 'chains live'],
@@ -202,6 +204,35 @@
     return el('span', { class: 'sig' }, bar, el('span', { class: 'sigv', text: String(r.signal) }));
   }
 
+  // Why a pick earns its place, in one line, from the row's own figures alone.
+  function pickReason(r) {
+    if (r.change_7d !== null && r.change_7d >= 25) return 'growing ' + fmtPct(r.change_7d) + ' in 7 days';
+    if (r.age_days !== null && r.age_days >= 1095) return fmtAge(r.age_days) + ' tracked, still no token';
+    if (r.peer_multiple >= 0.5) return 'its launched peers trade at ' + fmtMult(r.peer_multiple);
+    if (r.chains.length >= 6) return 'live on ' + r.chains.length + ' chains';
+    if (r.size_multiplier >= 1.3) return 'small beside the launched median: size ' + fmtMult(r.size_multiplier);
+    return 'signal ' + r.signal + '/100 across size, momentum, tenure, breadth';
+  }
+
+  // The top picks: the five strongest signals on the board, each with its reason and its plan's
+  // price tag, so a reader's first move is on the page before the table asks for any scrolling.
+  function picks() {
+    var top = DATA.rows.slice().sort(function (a, b) { return b.signal - a.signal || a.rank - b.rank; }).slice(0, 5);
+    return el('section', { class: 'picks' },
+      el('div', { class: 'picks-head' },
+        el('h2', { text: 'Top picks' }),
+        el('span', { text: 'strongest signals first \u00b7 the plan\u2019s whole cost on each card' })),
+      el('div', { class: 'pick-grid' }, top.map(function (r) {
+        return el('button', { class: 'pick', onclick: function () { go({ view: 'detail', slug: r.slug }); } },
+          el('div', { class: 'pick-top' },
+            el('span', { class: 'pick-name', text: r.name }),
+            el('span', { class: 'pick-sig', text: String(r.signal) })),
+          el('div', { class: 'pick-iv', text: fmtUsd(r.implied_value_usd) }),
+          el('div', { class: 'pick-why', text: pickReason(r) }),
+          el('div', { class: 'pick-cost', text: 'plan: $' + r.plan_totals.capital_usd + ' parked \u00b7 ~$' + r.plan_totals.gas_usd + ' gas \u00b7 ' + r.plan_totals.weeks + ' weeks' }));
+      })));
+  }
+
   function boardTable() {
     var rows = filteredRows().slice().sort(SORTERS[state.sort] || SORTERS.implied);
     if (rows.length === 0) return el('div', { class: 'empty', text: 'No protocol matches that filter. Loosen the search, the tier or the chain.' });
@@ -254,10 +285,21 @@
     var wf = [
       ['TVL (snapshot)', fmtUsd(r.tvl_usd), 'the protocol\u2019s own figure, sealed ' + DATA.as_of],
       ['x peer multiple', fmtMult(r.peer_multiple), 'median of ' + peerCount + ' launched ' + (r.category || 'Uncategorised') + (peerCount === 1 ? ' peer' : ' peers') + ', shrunk toward the universe median'],
+      ['x size', fmtMult(r.size_multiplier), 'TVL against the launched set\u2019s median of ' + fmtUsd(DATA.size_ref_tvl) + ', at the size discount the launched set itself shows'],
       ['x momentum', fmtMult(r.momentum_multiplier), 'TVL change over 7 days: ' + fmtPct(r.change_7d) + ', winsorised to [-50%, +100%]'],
       ['x tenure', fmtMult(r.tenure_multiplier), 'tracked ' + fmtAge(r.age_days) + ' with no token recorded'],
       ['x breadth', fmtMult(r.breadth_multiplier), 'live on ' + r.chains.length + (r.chains.length === 1 ? ' chain' : ' chains')],
     ];
+    var below = 0;
+    var ivs = DATA.rows.map(function (x) { return x.implied_value_usd; }).sort(function (a, b) { return a - b; });
+    DATA.rows.forEach(function (x) { if (x.tvl_usd <= r.tvl_usd) below++; });
+    var tvlPct = Math.round((100 * below) / DATA.rows.length);
+    var medIv = ivs[Math.floor(ivs.length / 2)];
+    var planTotals = el('div', { class: 'plan-totals' },
+      el('span', { class: 'chip' }, 'CAPITAL ', el('b', { text: '$' + r.plan_totals.capital_usd + ' parked' })),
+      el('span', { class: 'chip' }, 'GAS ', el('b', { text: '~$' + r.plan_totals.gas_usd + ' all-in' })),
+      el('span', { class: 'chip' }, 'RUNS ', el('b', { text: r.plan_totals.weeks + ' weeks' })),
+      el('span', { class: 'chip' }, 'WORK ', el('b', { text: '~' + r.plan_totals.minutes_per_week + ' min/week' })));
     var plan = el('ol', { class: 'plan' }, r.farm_steps.map(function (s) {
       var p = splitStep(s);
       return el('li', null,
@@ -294,10 +336,12 @@
             el('dt', { text: '7-day change' }), el('dd', { text: fmtPct(r.change_7d) }),
             el('dt', { text: 'Tracked since' }), el('dd', { text: r.listed_at || 'not recorded' }),
             el('dt', { text: 'Age' }), el('dd', { text: fmtAge(r.age_days) }),
+            el('dt', { text: 'TVL percentile' }), el('dd', { text: 'above ' + tvlPct + '% of the board' }),
+            el('dt', { text: 'Vs board median' }), el('dd', { text: 'x' + (r.implied_value_usd / medIv).toFixed(1) + ' the median implied value' }),
             el('dt', { text: 'Token' }), el('dd', { text: 'none recorded in the snapshot' })))),
       el('div', { class: 'cols' },
         el('div', { class: 'card' },
-          el('h3', { text: 'The farm plan' }), plan),
+          el('h3', { text: 'The farm plan' }), planTotals, plan),
         el('div', null,
           el('div', { class: 'card' },
             el('h3', { text: 'Launched peers that set the price' }),
@@ -349,15 +393,18 @@
       el('ul', null,
         el('li', null, el('b', { text: 'Coverage. ' }), 'Every watchlist protocol is ranked, and the watchlist\u2019s own product test (no exchange products, no bridge or staking wrappers of launched tokens, no versioned pools) is applied to the whole universe to find the early rows below the $' + (DATA.floor_usd / 1e6) + 'M floor.'),
         el('li', null, el('b', { text: 'Peer multiple. ' }), 'For each category, the multiples of market cap to TVL of its launched protocols in this snapshot, winsorised to [x0.02, x5] and shrunk toward the universe median of x' + DATA.global_multiple.toFixed(3) + ' behind a prior worth four peers, so one lone peer never prices a whole category, clamped to [x0.04, x2]. No name is priced by hand.'),
+        el('li', null, el('b', { text: 'Size. ' }), 'The launched set prices size at a discount: across its ' + DATA.launched_count + ' protocols, the multiple of market cap to TVL falls as TVL grows. The model applies (TVL / ' + fmtUsd(DATA.size_ref_tvl) + ', the launched set\u2019s median TVL) to the power -0.25, clamped to [x0.5, x2], so the largest protocols are no longer priced as if they were small ones. The exponent is the setting the check below scores best, not a round number picked by hand.'),
         el('li', null, el('b', { text: 'Momentum. ' }), 'The 7-day TVL change, winsorised to [-50%, +100%], moves the price by up to +35% or -17.5%: growth into a launch is worth more, bleed is worth less.'),
-        el('li', null, el('b', { text: 'Tenure. ' }), 'Years tracked with no token recorded scale the price from x0.78 to x1.22 across three years. An unknown age scores the pre-token universe\u2019s own median age, ' + DATA.median_age_days + ' days.'),
-        el('li', null, el('b', { text: 'Breadth. ' }), 'Each chain past the first adds 3%, to +24%: distribution a launch inherits.'),
+        el('li', null, el('b', { text: 'Tenure. ' }), 'Years tracked with no token recorded scale the price from x0.78 to x1.22 across four years. An unknown age scores the pre-token universe\u2019s own median age, ' + DATA.median_age_days + ' days.'),
+        el('li', null, el('b', { text: 'Breadth. ' }), 'Each chain past the first adds 2%, to +12%: distribution a launch inherits.'),
         el('li', null, el('b', { text: 'Signal. ' }), 'A 0-100 blend (size 40%, momentum 25%, tenure 20%, breadth 15%) for sorting a farmer\u2019s week. It never changes a rank: ranks are implied value alone.')),
       el('h3', { text: 'Category pricing table, computed from this snapshot' }),
       el('div', { class: 'scroll' }, el('table', { class: 'mini' },
         el('thead', null, el('tr', null, el('th', { class: 'n', text: 'Category' }), el('th', { text: 'Launched peers' }), el('th', { text: 'Median x TVL' }), el('th', { text: 'Multiple in force' }))),
         el('tbody', null, catRows))),
-      el('p', { text: 'A category with no launched peer carrying both figures is priced at the universe median. Every figure on this page re-derives from the sealed snapshot of ' + DATA.as_of + '; rerun the program on a fresher snapshot and the board, the table and the prices move with it.' }));
+      el('p', { text: 'A category with no launched peer carrying both figures is priced at the universe median. Every figure on this page re-derives from the sealed snapshot of ' + DATA.as_of + '; rerun the program on a fresher snapshot and the board, the table and the prices move with it.' }),
+      el('h3', { text: 'How the radar checks itself' }),
+      el('p', null, 'Before any price here was trusted, the model was pointed at the snapshot\u2019s ', el('b', { text: DATA.backtest.protocols + ' launched protocols' }), ' and asked to price each one as if it were still pre-token, from a pricing table built out of the others alone \u2014 the leave-one-out check. Under the previous configuration the median miss was a factor of ', el('b', { text: 'x' + DATA.backtest.previous.typical_factor.toFixed(2) }), ' (' + DATA.backtest.previous.within_2x_pct + '% priced within x2 of the real market cap, ' + DATA.backtest.previous.within_3x_pct + '% within x3). Under this one the median miss is ', el('b', { text: 'x' + DATA.backtest.current.typical_factor.toFixed(2) }), ' (' + DATA.backtest.current.within_2x_pct + '% within x2, ' + DATA.backtest.current.within_3x_pct + '% within x3). Every setting that differs between the two \u2014 the size exponent, the tenure horizon, the breadth weight \u2014 was kept only because this check scored it better. The check reruns on every build, from the snapshot alone, and these are this snapshot\u2019s figures.'));
   }
 
   function render() {
@@ -377,6 +424,7 @@
     } else {
       var rows = filteredRows();
       bar.appendChild(controls(rows));
+      app.appendChild(picks());
       app.appendChild(boardTable());
     }
     app.appendChild(el('footer', null,
