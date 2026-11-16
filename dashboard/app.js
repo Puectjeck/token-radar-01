@@ -30,9 +30,17 @@
   }
   function fmtMult(n) { return 'x' + Number(n).toFixed(3); }
 
+  var CLASS_LABELS = { core: 'core', exchange: 'exchange', bridge: 'bridge', 'staking-wrapper': 'staking wrapper', versioned: 'versioned', wrapper: 'wrapper' };
+  var CLASS_PRICED = { exchange: true, bridge: true, 'staking-wrapper': true };
+  function classPeers(cls) {
+    var found = null;
+    DATA.classes.forEach(function (c) { if (c.protocol_class === cls) found = c; });
+    return found;
+  }
+
   // The model in one function: the same arithmetic lib/model.ts runs, from the row's own figures.
   function impliedOf(row) {
-    return Math.max(1, Math.round(row.tvl_usd * row.peer_multiple * row.size_multiplier * row.momentum_multiplier * row.tenure_multiplier * row.breadth_multiplier));
+    return Math.max(1, Math.round(row.tvl_usd * row.peer_multiple * row.size_multiplier * row.momentum_multiplier * row.tenure_multiplier * row.breadth_multiplier * row.class_multiplier));
   }
 
   function el(tag, attrs) {
@@ -57,7 +65,7 @@
 
   // State lives in the hash, so any view can be linked, screenshotted and returned to.
   function readHash() {
-    var s = { view: 'board', q: '', cat: 'all', chain: 'all', tier: 'all', sort: 'implied', slug: null };
+    var s = { view: 'board', q: '', cat: 'all', chain: 'all', tier: 'all', cls: 'all', sort: 'implied', slug: null };
     var h = window.location.hash.replace(/^#\/?/, '');
     h.split('&').forEach(function (pair) {
       var kv = pair.split('=');
@@ -94,7 +102,7 @@
       rings,
       el('div', { class: 'wordmark' },
         el('h1', null, 'DEEPFIELD ', el('span', { class: 'lite', text: 'RADAR' })),
-        el('p', { class: 'tagline', text: 'Pre-token protocols priced off the multiples their launched peers actually trade at. Every protocol on the watchlist, every rankable one below it, each with the arithmetic shown and a farm plan with costs and times.' })),
+        el('p', { class: 'tagline', text: 'Pre-token protocols priced off the multiples their launched peers actually trade at. Every pre-token protocol in the snapshot is ranked \u2014 the watchlist, the exchanges, the bridges, the staking wrappers, the versioned releases \u2014 none set aside, each with the arithmetic shown and a farm plan with costs and times.' })),
       el('div', { class: 'mast-meta' },
         el('div', null, 'SNAPSHOT ', el('b', { text: DATA.as_of })),
         el('div', null, 'MODEL ', el('b', { text: DATA.model_version })),
@@ -124,6 +132,7 @@
       ['x momentum', 'the 7-day TVL change, winsorised'],
       ['x tenure', 'years tracked with no token'],
       ['x breadth', 'chains live'],
+      ['x class', 'the class multiplier: a versioned family\u2019s share, a wrapper\u2019s measured haircut, else 1'],
     ];
     parts.forEach(function (p) {
       var b = el('b', { text: p[0], title: p[1] });
@@ -149,6 +158,7 @@
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.tier !== 'all' && r.tier !== state.tier) return false;
+      if (state.cls !== 'all' && r.protocol_class !== state.cls) return false;
       if (state.cat !== 'all' && (r.category || 'Uncategorised') !== state.cat) return false;
       if (state.chain !== 'all' && r.chains.indexOf(state.chain) < 0) return false;
       if (q && r.name.toLowerCase().indexOf(q) < 0 && r.slug.indexOf(q) < 0) return false;
@@ -189,6 +199,8 @@
       }),
       el('label', { text: 'Tier' }),
       select('f-tier', state.tier, [['all', 'All tiers'], ['watchlist', 'Watchlist'], ['early', 'Early radar']], function (v) { go({ tier: v }); }),
+      el('label', { text: 'Class' }),
+      select('f-cls', state.cls, [['all', 'All classes'], ['core', 'Core'], ['exchange', 'Exchange'], ['bridge', 'Bridge'], ['staking-wrapper', 'Staking wrapper'], ['versioned', 'Versioned'], ['wrapper', 'Wrapper']], function (v) { go({ cls: v }); }),
       el('label', { text: 'Category' }),
       select('f-cat', state.cat, [['all', 'All categories']].concat(cats.map(function (c) { return [c, c]; })), function (v) { go({ cat: v }); }),
       el('label', { text: 'Chain' }),
@@ -249,7 +261,7 @@
     var tbody = el('tbody', null, rows.map(function (r) {
       return el('tr', { onclick: function () { go({ view: 'detail', slug: r.slug }); }, title: 'Open the detail view' },
         el('td', { class: 'rk', text: String(r.rank) }),
-        el('td', { class: 'n' }, el('span', { class: 'nm', text: r.name }), el('span', { class: 'tier' + (r.tier === 'watchlist' ? ' w' : ''), text: r.tier === 'watchlist' ? 'watchlist' : 'early' }), el('div', { class: 'slug', text: r.slug })),
+        el('td', { class: 'n' }, el('span', { class: 'nm', text: r.name }), el('span', { class: 'tier' + (r.tier === 'watchlist' ? ' w' : ''), text: r.tier === 'watchlist' ? 'watchlist' : 'early' }), r.protocol_class !== 'core' ? el('span', { class: 'tier k', text: CLASS_LABELS[r.protocol_class] }) : null, el('div', { class: 'slug', text: r.slug })),
         el('td', { class: 'cat n', text: r.category || 'Uncategorised' }),
         el('td', { class: 'chn n', text: r.chains.slice(0, 3).join(', ') + (r.chains.length > 3 ? ' +' + (r.chains.length - 3) : '') }),
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
@@ -280,15 +292,17 @@
     var peers = (DATA.peers[r.category || 'Uncategorised'] || []);
     var catEntry = null;
     DATA.categories.forEach(function (c) { if (c.category === (r.category || 'Uncategorised')) catEntry = c; });
-    var peerCount = catEntry ? catEntry.peers : 0;
+    var clsEntry = classPeers(r.protocol_class);
+    var peerCount = CLASS_PRICED[r.protocol_class] && clsEntry ? clsEntry.peers : catEntry ? catEntry.peers : 0;
     var verified = impliedOf(r) === r.implied_value_usd;
     var wf = [
       ['TVL (snapshot)', fmtUsd(r.tvl_usd), 'the protocol\u2019s own figure, sealed ' + DATA.as_of],
-      ['x peer multiple', fmtMult(r.peer_multiple), 'median of ' + peerCount + ' launched ' + (r.category || 'Uncategorised') + (peerCount === 1 ? ' peer' : ' peers') + ', shrunk toward the universe median'],
+      ['x peer multiple', fmtMult(r.peer_multiple), CLASS_PRICED[r.protocol_class] ? 'median of ' + peerCount + ' launched ' + CLASS_LABELS[r.protocol_class] + ' peers, pooled across the class\u2019s categories, shrunk toward the universe median' : 'median of ' + peerCount + ' launched ' + (r.category || 'Uncategorised') + (peerCount === 1 ? ' peer' : ' peers') + ', shrunk toward the universe median'],
       ['x size', fmtMult(r.size_multiplier), 'TVL against the launched set\u2019s median of ' + fmtUsd(DATA.size_ref_tvl) + ', at the size discount the launched set itself shows'],
       ['x momentum', fmtMult(r.momentum_multiplier), 'TVL change over 7 days: ' + fmtPct(r.change_7d) + ', winsorised to [-50%, +100%]'],
       ['x tenure', fmtMult(r.tenure_multiplier), 'tracked ' + fmtAge(r.age_days) + ' with no token recorded'],
       ['x breadth', fmtMult(r.breadth_multiplier), 'live on ' + r.chains.length + (r.chains.length === 1 ? ' chain' : ' chains')],
+      ['x class', fmtMult(r.class_multiplier), r.protocol_class === 'versioned' ? 'a versioned release, priced at its family\u2019s share: sibling releases of one protocol split one price' : r.protocol_class === 'wrapper' ? 'a wrapper in a generic category, priced with the staking classes\u2019 measured haircut of x' + DATA.wrapper_discount.toFixed(3) : CLASS_PRICED[r.protocol_class] ? 'a ' + CLASS_LABELS[r.protocol_class] + ': its class\u2019s own peer multiple above already carries the class discount, so no second haircut is stacked' : 'a core protocol: no class adjustment'],
     ];
     var below = 0;
     var ivs = DATA.rows.map(function (x) { return x.implied_value_usd; }).sort(function (a, b) { return a - b; });
@@ -315,7 +329,7 @@
       el('div', { class: 'detail-head' },
         el('div', null,
           el('h2', { text: r.name }),
-          el('div', { class: 'sub', text: (r.category || 'Uncategorised') + ' \u00b7 rank #' + r.rank + ' of ' + DATA.board_size + ' \u00b7 ' + (r.tier === 'watchlist' ? 'on the house watchlist' : 'found by the early radar below the floor') + ' \u00b7 signal ' + r.signal + '/100' })),
+          el('div', { class: 'sub', text: (r.category || 'Uncategorised') + ' \u00b7 class ' + CLASS_LABELS[r.protocol_class] + ' \u00b7 rank #' + r.rank + ' of ' + DATA.board_size + ' \u00b7 ' + (r.tier === 'watchlist' ? 'on the house watchlist' : 'found by the early radar below the floor') + ' \u00b7 signal ' + r.signal + '/100' })),
         el('div', { class: 'big-iv' },
           el('div', { class: 'v', text: fmtUsd(r.implied_value_usd) }),
           el('div', { class: 'k', text: 'implied value if it launched at peer prices' }))),
@@ -338,7 +352,8 @@
             el('dt', { text: 'Age' }), el('dd', { text: fmtAge(r.age_days) }),
             el('dt', { text: 'TVL percentile' }), el('dd', { text: 'above ' + tvlPct + '% of the board' }),
             el('dt', { text: 'Vs board median' }), el('dd', { text: 'x' + (r.implied_value_usd / medIv).toFixed(1) + ' the median implied value' }),
-            el('dt', { text: 'Token' }), el('dd', { text: 'none recorded in the snapshot' })))),
+            el('dt', { text: 'Token' }), el('dd', { text: 'none recorded in the snapshot' }),
+            el('dt', { text: 'Class' }), el('dd', { text: CLASS_LABELS[r.protocol_class] })))),
       el('div', { class: 'cols' },
         el('div', { class: 'card' },
           el('h3', { text: 'The farm plan' }), planTotals, plan),
@@ -391,18 +406,30 @@
       el('h2', { text: 'The method' }),
       el('p', null, 'The radar answers one question: ', el('b', { text: 'if this protocol issued its token at the price the market already pays its launched peers, what would it be worth, and what should a farmer do about it?' }), ' It never predicts whether or when a token comes.'),
       el('ul', null,
-        el('li', null, el('b', { text: 'Coverage. ' }), 'Every watchlist protocol is ranked, and the watchlist\u2019s own product test (no exchange products, no bridge or staking wrappers of launched tokens, no versioned pools) is applied to the whole universe to find the early rows below the $' + (DATA.floor_usd / 1e6) + 'M floor.'),
+        el('li', null, el('b', { text: 'Coverage. ' }), 'Every pre-token protocol in the snapshot is ranked: all ' + DATA.pre_token_size + ' of them, the watchlist\u2019s ' + DATA.watchlist_size + ' included, none set aside. Rows the radar once left off \u2014 exchanges, bridges, staking wrappers, versioned releases \u2014 are priced under the class their own category and name assign them, below.'),
         el('li', null, el('b', { text: 'Peer multiple. ' }), 'For each category, the multiples of market cap to TVL of its launched protocols in this snapshot, winsorised to [x0.02, x5] and shrunk toward the universe median of x' + DATA.global_multiple.toFixed(3) + ' behind a prior worth four peers, so one lone peer never prices a whole category, clamped to [x0.04, x2]. No name is priced by hand.'),
         el('li', null, el('b', { text: 'Size. ' }), 'The launched set prices size at a discount: across its ' + DATA.launched_count + ' protocols, the multiple of market cap to TVL falls as TVL grows. The model applies (TVL / ' + fmtUsd(DATA.size_ref_tvl) + ', the launched set\u2019s median TVL) to the power -0.25, clamped to [x0.5, x2], so the largest protocols are no longer priced as if they were small ones. The exponent is the setting the check below scores best, not a round number picked by hand.'),
         el('li', null, el('b', { text: 'Momentum. ' }), 'The 7-day TVL change, winsorised to [-50%, +100%], moves the price by up to +35% or -17.5%: growth into a launch is worth more, bleed is worth less.'),
         el('li', null, el('b', { text: 'Tenure. ' }), 'Years tracked with no token recorded scale the price from x0.78 to x1.22 across four years. An unknown age scores the pre-token universe\u2019s own median age, ' + DATA.median_age_days + ' days.'),
         el('li', null, el('b', { text: 'Breadth. ' }), 'Each chain past the first adds 2%, to +12%: distribution a launch inherits.'),
-        el('li', null, el('b', { text: 'Signal. ' }), 'A 0-100 blend (size 40%, momentum 25%, tenure 20%, breadth 15%) for sorting a farmer\u2019s week. It never changes a rank: ranks are implied value alone.')),
+        el('li', null, el('b', { text: 'Signal. ' }), 'A 0-100 blend (size 40%, momentum 25%, tenure 20%, breadth 15%) for sorting a farmer\u2019s week. It never changes a rank: ranks are implied value alone.'),
+        el('li', null, el('b', { text: 'Classes. ' }), 'A row\u2019s class comes from its own snapshot fields, never a list of names. Exchange, bridge and staking-wrapper rows (assigned by category) are priced off their class\u2019s launched peers, pooled across the class\u2019s categories in the class table below: what launched exchanges trade at prices an exchange. A versioned row (its name ends in a release marker) is priced at its family\u2019s share, x1 divided by the number of snapshot rows sharing its version-stripped name, so sibling releases split one price. A wrapper row in a generic category (a wrapped, staked or staking word in its name) takes the staking classes\u2019 measured haircut, x' + DATA.wrapper_discount.toFixed(3) + ' on this snapshot. No second haircut is stacked on the category classes: the check below shows their own peer multiple already carries the discount, and stacking one prices the launched set worse.')),
       el('h3', { text: 'Category pricing table, computed from this snapshot' }),
       el('div', { class: 'scroll' }, el('table', { class: 'mini' },
         el('thead', null, el('tr', null, el('th', { class: 'n', text: 'Category' }), el('th', { text: 'Launched peers' }), el('th', { text: 'Median x TVL' }), el('th', { text: 'Multiple in force' }))),
         el('tbody', null, catRows))),
       el('p', { text: 'A category with no launched peer carrying both figures is priced at the universe median. Every figure on this page re-derives from the sealed snapshot of ' + DATA.as_of + '; rerun the program on a fresher snapshot and the board, the table and the prices move with it.' }),
+      el('h3', { text: 'Class pricing, computed from this snapshot' }),
+      el('div', { class: 'scroll' }, el('table', { class: 'mini' },
+        el('thead', null, el('tr', null, el('th', { class: 'n', text: 'Class' }), el('th', { text: 'Launched peers' }), el('th', { text: 'Median x TVL' }), el('th', { text: 'Multiple in force' }))),
+        el('tbody', null, DATA.classes.map(function (c) {
+          return el('tr', null,
+            el('td', { class: 'n', text: CLASS_LABELS[c.protocol_class] }),
+            el('td', { class: 'num', text: String(c.peers) }),
+            el('td', { class: 'num', text: c.median === null ? 'n/a' : fmtMult(c.median) }),
+            el('td', { class: 'num', text: fmtMult(c.multiple) }));
+        })))),
+      el('p', { text: 'Versioned and wrapper rows have no launched class of their own to pool: they are priced by the family share and the staking haircut described above, over their category\u2019s multiple.' }),
       el('h3', { text: 'How the radar checks itself' }),
       el('p', null, 'Before any price here was trusted, the model was pointed at the snapshot\u2019s ', el('b', { text: DATA.backtest.protocols + ' launched protocols' }), ' and asked to price each one as if it were still pre-token, from a pricing table built out of the others alone \u2014 the leave-one-out check. Under the previous configuration the median miss was a factor of ', el('b', { text: 'x' + DATA.backtest.previous.typical_factor.toFixed(2) }), ' (' + DATA.backtest.previous.within_2x_pct + '% priced within x2 of the real market cap, ' + DATA.backtest.previous.within_3x_pct + '% within x3). Under this one the median miss is ', el('b', { text: 'x' + DATA.backtest.current.typical_factor.toFixed(2) }), ' (' + DATA.backtest.current.within_2x_pct + '% within x2, ' + DATA.backtest.current.within_3x_pct + '% within x3). Every setting that differs between the two \u2014 the size exponent, the tenure horizon, the breadth weight \u2014 was kept only because this check scored it better. The check reruns on every build, from the snapshot alone, and these are this snapshot\u2019s figures.'));
   }
